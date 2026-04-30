@@ -2,7 +2,7 @@ import React from 'react';
 import { View, StyleSheet } from 'react-native';
 
 export const Arrow = ({ position, angle, velocity }) => {
-  const speed = Math.sqrt(velocity?.x ** 2 + velocity?.y ** 2) || 0;
+  const speed = velocity ? Math.sqrt(velocity.x ** 2 + velocity.y ** 2) : 0;
   const opacity = Math.max(0.3, 1 - speed / 1000);
   
   return (
