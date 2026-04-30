@@ -100,11 +100,15 @@ export default function App() {
     }
   }, [gameState]);
 
+  // Aim point for crosshair visualization
+  const [aimPoint, setAimPoint] = useState({ x: width - 120, y: height / 2 });
+  
   // Build entities object
   const entities = {
     bow: {
       position: { x: 80, y: height / 2 },
       aimAngle: 0,
+      aimPoint: aimPoint,
       drawPower: drawPower,
       renderer: <Bow />
     },
@@ -125,6 +129,7 @@ export default function App() {
       onDrawUpdate: (value) => onEvent({ type: 'drawUpdate', value }),
       onArrowUpdate: (arrow) => onEvent({ type: 'arrowUpdate', arrow }),
       onScore: (score) => onEvent({ type: 'score', score }),
+      onAimUpdate: (point) => setAimPoint(point),
     }
   };
 
@@ -203,11 +208,19 @@ export default function App() {
             </View>
           )}
 
+          {/* Crosshair */}
+          {(gameState === 'aiming' || gameState === 'drawing') && (
+            <View style={[styles.crosshair, { left: aimPoint.x - 10, top: aimPoint.y - 10 }]}>
+              <View style={styles.crosshairH} />
+              <View style={styles.crosshairV} />
+            </View>
+          )}
+
           {/* State indicator */}
           <View style={styles.stateContainer}>
             <Text style={styles.stateText}>
-              {gameState === 'aiming' && 'TAP & HOLD TO DRAW'}
-              {gameState === 'drawing' && 'RELEASE TO FIRE'}
+              {gameState === 'aiming' && 'TILT TO AIM • TAP & HOLD TO DRAW'}
+              {gameState === 'drawing' && 'TILT TO AIM • RELEASE TO FIRE'}
               {gameState === 'firing' && '...'}
               {gameState === 'scoring' && 'HIT!'}
             </Text>
@@ -319,5 +332,24 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#888',
     letterSpacing: 2,
+  },
+  crosshair: {
+    position: 'absolute',
+    width: 20,
+    height: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  crosshairH: {
+    position: 'absolute',
+    width: 20,
+    height: 2,
+    backgroundColor: 'rgba(255, 255, 255, 0.8)',
+  },
+  crosshairV: {
+    position: 'absolute',
+    width: 2,
+    height: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.8)',
   },
 });

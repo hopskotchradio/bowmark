@@ -7,6 +7,11 @@ const AIR_RESISTANCE = 0.998;
 export const GameLoop = (entities, { touches, dispatch }) => {
   const { bow, target, arrow, gameState, gyro, stamina, wind, callbacks } = entities;
   
+  // Initialize aimPoint if not set
+  if (!bow.aimPoint) {
+    bow.aimPoint = { x: width - 120, y: height / 2 };
+  }
+  
   // Handle touch input for drawing
   touches.forEach(t => {
     if (t.type === 'start' && gameState.value === 'aiming') {
@@ -22,9 +27,14 @@ export const GameLoop = (entities, { touches, dispatch }) => {
       gameState.value = 'firing';
       callbacks?.onStateChange?.('firing');
       
+      // Calculate aim angle from bow to aimPoint
+      const dx = bow.aimPoint.x - bow.position.x;
+      const dy = bow.aimPoint.y - bow.position.y;
+      const aimAngle = Math.atan2(dy, dx) * (180 / Math.PI);
+      
       // Spawn arrow with velocity based on draw power
       const power = Math.max(0.3, bow.drawPower / 100);
-      const angleRad = (bow.aimAngle * Math.PI) / 180;
+      const angleRad = aimAngle * Math.PI / 180;
       const baseVelocity = 18;
       
       entities.arrow = {
@@ -36,7 +46,7 @@ export const GameLoop = (entities, { touches, dispatch }) => {
           x: Math.cos(angleRad) * power * baseVelocity,
           y: Math.sin(angleRad) * power * baseVelocity,
         },
-        angle: bow.aimAngle,
+        angle: aimAngle,
         active: true,
       };
       
@@ -46,13 +56,36 @@ export const GameLoop = (entities, { touches, dispatch }) => {
     }
   });
 
-  // Gyro aiming (only when aiming or drawing)
+  // Full gyro aiming (2D)
   if (gameState.value === 'aiming' || gameState.value === 'drawing') {
-    // Map gyro rotation to aim angle
-    // Gyro gives radians/sec, accumulate for angle
-    const sensitivity = 3;
-    const targetAngle = gyro.y * sensitivity * 60;
-    bow.aimAngle = Math.max(-75, Math.min(75, targetAngle));
+    // Gyro gives rotation rate around each axis (rad/s)
+    // x = pitch (tilt forward/back) -> moves aim up/down
+    // y = roll (tilt left/right) -> moves aim left/right  
+    // z = yaw (rotate phone) -> could also affect aiming
+    
+    const sensitivity = 4;
+    const deadzone = 0.05;
+    
+    // Apply gyro input to aim point
+    // Invert Y because tilting phone forward (pitch down) should aim down
+    const gyroX = Math.abs(gyro.x) > deadzone ? -gyro.x : 0;
+    const gyroY = Math.abs(gyro.y) > deadzone ? gyro.y : 0;
+    
+    bow.aimPoint.x += gyroY * sensitivity * 3;
+    bow.aimPoint.y += gyroX * sensitivity * 3;
+    
+    // Clamp aim point to screen bounds (with padding)
+    const padding = 50;
+    bow.aimPoint.x = Math.max(padding, Math.min(width - padding, bow.aimPoint.x));
+    bow.aimPoint.y = Math.max(padding, Math.min(height - padding, bow.aimPoint.y));
+    
+    // Notify UI of aim point update
+    callbacks?.onAimUpdate?.(bow.aimPoint);
+    
+    // Calculate aim angle for bow rotation
+    const dx = bow.aimPoint.x - bow.position.x;
+    const dy = bow.aimPoint.y - bow.position.y;
+    bow.aimAngle = Math.atan2(dy, dx) * (180 / Math.PI);
     
     // Drain stamina while drawing
     if (gameState.value === 'drawing') {
