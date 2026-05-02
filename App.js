@@ -1,57 +1,131 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { 
-  StyleSheet, 
-  View, 
-  Dimensions, 
-  TouchableWithoutFeedback,
+import {
+  StyleSheet,
+  View,
+  Dimensions,
   Animated,
-  Text
+  Text,
 } from 'react-native';
-import { GameEngine } from 'react-native-game-engine';
 import { Gyroscope } from 'expo-sensors';
 import { StatusBar } from 'expo-status-bar';
 
-import { GameLoop } from './src/systems/GameLoop';
-import { Bow } from './src/entities/Bow';
-import { Target } from './src/entities/Target';
-import { Arrow } from './src/entities/Arrow';
-
 const { width, height } = Dimensions.get('window');
 
+// Simple entity components
+const BowView = ({ drawPower }) => (
+  <View style={styles.bowContainer}>
+    <View style={[styles.bowString, { right: 100 + drawPower * 0.5 }]} />
+    <View style={styles.bowArc} />
+    <View style={styles.bowHandle} />
+  </View>
+);
+
+const ArrowView = ({ drawPower, isFiring }) => {
+  const arrowAnim = useRef(new Animated.Value(0)).current;
+  
+  useEffect(() => {
+    if (isFiring) {
+      Animated.timing(arrowAnim, {
+        toValue: 1,
+        duration: 300,
+        useNativeDriver: true,
+      }).start();
+    } else {
+      arrowAnim.setValue(0);
+    }
+  }, [isFiring]);
+  
+  const translateY = arrowAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, -height * 0.8],
+  });
+  
+  const scale = arrowAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [1, 0.5],
+  });
+  
+  const opacity = arrowAnim.interpolate({
+    inputRange: [0, 0.8, 1],
+    outputRange: [1, 1, 0],
+  });
+  
+  return (
+    <Animated.View style={[
+      styles.arrow, 
+      { 
+        right: 100 + drawPower * 0.5,
+        transform: [
+          { translateY },
+          { scale },
+        ],
+        opacity,
+      }
+    ]}>
+      <View style={styles.arrowShaft} />
+      <View style={styles.arrowHead} />
+    </Animated.View>
+  );
+};
+
+const TargetView = ({ x, y }) => (
+  <View style={[styles.target, { left: x - 40, top: y - 40 }]}>
+    <View style={[styles.targetRing, { width: 80, height: 80, borderRadius: 40 }]} />
+    <View style={[styles.targetRing, { width: 60, height: 60, borderRadius: 30, backgroundColor: '#000' }]} />
+    <View style={[styles.targetRing, { width: 40, height: 40, borderRadius: 20, backgroundColor: '#00f' }]} />
+    <View style={[styles.targetRing, { width: 20, height: 20, borderRadius: 10, backgroundColor: '#f00' }]} />
+  </View>
+);
+
 export default function App() {
-  const [gyroData, setGyroData] = useState({ x: 0, y: 0, z: 0 });
-  const [gameState, setGameState] = useState('aiming');
-  const [stamina, setStamina] = useState(100);
+  const [gameState, setGameState] = useState('aiming'); // aiming, drawing, firing
   const [drawPower, setDrawPower] = useState(0);
   const [score, setScore] = useState(0);
-  const [arrowEntity, setArrowEntity] = useState(null);
-  const [lastShotScore, setLastShotScore] = useState(null);
+  const [aimOffset, setAimOffset] = useState({ x: 0, y: 0 }); // Gyro-based aim adjustment
   
-  const engineRef = useRef(null);
-  const gyroSubscription = useRef(null);
-  const entitiesRef = useRef({});
-  const staminaAnim = useRef(new Animated.Value(100)).current;
-  const drawAnim = useRef(new Animated.Value(0)).current;
-
+  // Target position (moves with gyro aim — full screen range)
+  // When aimOffset is 0, target is centered on crosshair (screen center)
+  const targetX = width / 2 - aimOffset.x * 2;
+  const targetY = height / 2 - aimOffset.y * 2;
+  
+  // Gyro calibration - stores the current aim offset as the new "center"
+  const [aimOffsetBase, setAimOffsetBase] = useState({ x: 0, y: 0 });
+  const [rawAimOffset, setRawAimOffset] = useState({ x: 0, y: 0 });
+  
+  const recalibrate = () => {
+    // Set current position as the new center
+    // aimOffset will become: rawAimOffset - aimOffsetBase
+    // So we set aimOffsetBase to rawAimOffset to make current position zero
+    setAimOffsetBase({ ...rawAimOffset });
+  };
+  
   // Gyro setup
   useEffect(() => {
     Gyroscope.setUpdateInterval(16);
-    gyroSubscription.current = Gyroscope.addListener(data => {
-      setGyroData(data);
+    const subscription = Gyroscope.addListener(data => {
+      // Gyro data: x = pitch (tilt forward/back), y = roll (tilt left/right)
+      const sensitivity = 3;
+      
+      setRawAimOffset(prev => {
+        const newRaw = {
+          x: Math.max(-100, Math.min(100, prev.x + data.y * sensitivity)),
+          y: Math.max(-80, Math.min(80, prev.y + data.x * sensitivity)),
+        };
+        
+        // Calculate calibrated aim offset
+        setAimOffset({
+          x: newRaw.x - aimOffsetBase.x,
+          y: newRaw.y - aimOffsetBase.y,
+        });
+        
+        return newRaw;
+      });
     });
-    return () => gyroSubscription.current?.remove();
-  }, []);
-
-  // Stamina animation
-  useEffect(() => {
-    Animated.timing(staminaAnim, {
-      toValue: stamina,
-      duration: 50,
-      useNativeDriver: false,
-    }).start();
-  }, [stamina]);
+    return () => subscription?.remove();
+  }, [aimOffsetBase]);
 
   // Draw power animation
+  const drawAnim = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.timing(drawAnim, {
       toValue: drawPower,
@@ -60,296 +134,332 @@ export default function App() {
     }).start();
   }, [drawPower]);
 
-  // Handle game events from GameLoop
-  const onEvent = useCallback((e) => {
-    if (e.type === 'score') {
-      setScore(s => s + e.score);
-      setLastShotScore(e.score);
-      setTimeout(() => setLastShotScore(null), 1500);
-    }
-    if (e.type === 'stateChange') {
-      setGameState(e.state);
-      if (e.state === 'aiming') {
-        setArrowEntity(null);
-        setDrawPower(0);
-      }
-    }
-    if (e.type === 'staminaUpdate') {
-      setStamina(e.value);
-    }
-    if (e.type === 'drawUpdate') {
-      setDrawPower(e.value);
-    }
-    if (e.type === 'arrowUpdate') {
-      setArrowEntity(e.arrow);
-    }
-  }, []);
-
-  // Touch handlers
-  const onTouchStart = useCallback(() => {
-    if (gameState === 'aiming' || gameState === 'scoring') {
+  // Touch handling - simple press handlers
+  const [isPressed, setIsPressed] = useState(false);
+  const pressStartY = useRef(0);
+  
+  const onTouchStart = (evt) => {
+    if (gameState === 'aiming') {
       setGameState('drawing');
       setDrawPower(0);
-      setLastShotScore(null);
+      pressStartY.current = evt.nativeEvent.pageY;
+      setIsPressed(true);
     }
-  }, [gameState]);
-
-  const onTouchEnd = useCallback(() => {
-    if (gameState === 'drawing') {
-      setGameState('firing');
-    }
-  }, [gameState]);
-
-  // Aim point for crosshair visualization
-  const [aimPoint, setAimPoint] = useState({ x: width - 120, y: height / 2 });
+  };
   
-  // Build entities object
-  const entities = {
-    bow: {
-      position: { x: 80, y: height / 2 },
-      aimAngle: 0,
-      aimPoint: aimPoint,
-      drawPower: drawPower,
-      renderer: <Bow />
-    },
-    target: {
-      position: { x: width - 120, y: height / 2 },
-      radius: 50,
-      moving: false,
-      renderer: <Target />
-    },
-    arrow: arrowEntity,
-    gameState: { value: gameState, setValue: setGameState },
-    gyro: gyroData,
-    stamina: { value: stamina, setValue: setStamina },
-    wind: { x: 3, y: -1 },
-    callbacks: {
-      onStateChange: (state) => onEvent({ type: 'stateChange', state }),
-      onStaminaUpdate: (value) => onEvent({ type: 'staminaUpdate', value }),
-      onDrawUpdate: (value) => onEvent({ type: 'drawUpdate', value }),
-      onArrowUpdate: (arrow) => onEvent({ type: 'arrowUpdate', arrow }),
-      onScore: (score) => onEvent({ type: 'score', score }),
-      onAimUpdate: (point) => setAimPoint(point),
+  const onTouchMove = (evt) => {
+    if (gameState === 'drawing' && isPressed) {
+      const currentY = evt.nativeEvent.pageY;
+      const pullDistance = Math.max(0, currentY - pressStartY.current);
+      const power = Math.min(100, pullDistance * 0.3);
+      setDrawPower(power);
+    }
+  };
+  
+  const onTouchEnd = () => {
+    setIsPressed(false);
+    if (gameState === 'drawing') {
+      fireArrow();
     }
   };
 
-  entitiesRef.current = entities;
+  const fireArrow = () => {
+    setGameState('firing');
+    
+    // Calculate hit based on aim accuracy
+    const aimX = targetX + aimOffset.x;
+    const aimY = targetY + aimOffset.y;
+    const distance = Math.sqrt(
+      Math.pow(aimX - width/2, 2) + 
+      Math.pow(aimY - height/2, 2) // Crosshair is at screen center
+    );
+    
+    // Power affects accuracy (more power = flatter trajectory = more accurate)
+    const accuracyBonus = drawPower * 0.5;
+    const effectiveDistance = Math.max(0, distance - accuracyBonus);
+    
+    // Score based on distance from center
+    let points = 0;
+    if (effectiveDistance < 20) points = 10;
+    else if (effectiveDistance < 40) points = 8;
+    else if (effectiveDistance < 60) points = 6;
+    else if (effectiveDistance < 80) points = 4;
+    else if (effectiveDistance < 100) points = 2;
+    
+    setScore(s => s + points);
+    
+    // Reset after delay
+    setTimeout(() => {
+      setGameState('aiming');
+      setDrawPower(0);
+    }, 1500);
+  };
 
-  // Interpolated values for UI
-  const staminaWidth = staminaAnim.interpolate({
-    inputRange: [0, 100],
-    outputRange: ['0%', '100%'],
-  });
-
-  const drawWidth = drawAnim.interpolate({
+  const powerWidth = drawAnim.interpolate({
     inputRange: [0, 100],
     outputRange: ['0%', '100%'],
   });
 
   return (
-    <TouchableWithoutFeedback 
-      onPressIn={onTouchStart}
-      onPressOut={onTouchEnd}
-    >
-      <View style={styles.container}>
-        <GameEngine
-          ref={engineRef}
-          style={styles.gameContainer}
-          systems={[GameLoop]}
-          entities={entities}
-          running={true}
-          onEvent={onEvent}
-        />
-
-        {/* UI Overlay */}
-        <View style={styles.uiContainer} pointerEvents="none">
-          {/* Score */}
-          <View style={styles.scoreContainer}>
-            <Text style={styles.scoreText}>{score}</Text>
-            {lastShotScore && (
-              <Text style={styles.lastShotText}>+{lastShotScore}</Text>
-            )}
-          </View>
-
-          {/* Wind Indicator */}
-          <View style={styles.windContainer}>
-            <Text style={styles.windLabel}>WIND</Text>
-            <View style={styles.windArrow}>
-              <Text style={[
-                styles.windDirection,
-                { transform: [{ rotate: `${Math.atan2(entities.wind.y, entities.wind.x) * 180 / Math.PI}deg` }] }
-              ]}>➤</Text>
-              <Text style={styles.windSpeed}>{Math.round(Math.sqrt(entities.wind.x ** 2 + entities.wind.y ** 2))}</Text>
-            </View>
-          </View>
-
-          {/* Stamina Bar */}
-          <View style={styles.staminaContainer}>
-            <Text style={styles.barLabel}>STAMINA</Text>
-            <View style={styles.barBackground}>
-              <Animated.View style={[
-                styles.staminaBar,
-                { width: staminaWidth },
-                stamina < 30 && styles.staminaLow
-              ]} />
-            </View>
-          </View>
-
-          {/* Draw Power Bar (only when drawing) */}
-          {gameState === 'drawing' && (
-            <View style={styles.drawContainer}>
-              <Text style={styles.barLabel}>POWER</Text>
-              <View style={styles.barBackground}>
-                <Animated.View style={[
-                  styles.drawBar,
-                  { width: drawWidth }
-                ]} />
-              </View>
-            </View>
-          )}
-
-          {/* Crosshair */}
-          {(gameState === 'aiming' || gameState === 'drawing') && (
-            <View style={[styles.crosshair, { left: aimPoint.x - 10, top: aimPoint.y - 10 }]}>
-              <View style={styles.crosshairH} />
-              <View style={styles.crosshairV} />
-            </View>
-          )}
-
-          {/* State indicator */}
-          <View style={styles.stateContainer}>
-            <Text style={styles.stateText}>
-              {gameState === 'aiming' && 'TILT TO AIM • TAP & HOLD TO DRAW'}
-              {gameState === 'drawing' && 'TILT TO AIM • RELEASE TO FIRE'}
-              {gameState === 'firing' && '...'}
-              {gameState === 'scoring' && 'HIT!'}
-            </Text>
-          </View>
+    <View style={styles.container}>
+      {/* Sky/background */}
+      <View style={styles.sky} />
+      
+      {/* Target - moves based on gyro aim */}
+      <TargetView x={targetX + aimOffset.x} y={targetY + aimOffset.y} />
+      
+      {/* Ground */}
+      <View style={styles.ground} />
+      
+      {/* First person bow view at bottom - touch area for drawing */}
+      <View 
+        style={styles.bowTouchArea}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+      >
+        <View style={styles.bowWrapper}>
+          <BowView drawPower={drawPower} />
+          <ArrowView drawPower={drawPower} isFiring={gameState === 'firing'} />
         </View>
-
-        <StatusBar style="light" hidden />
       </View>
-    </TouchableWithoutFeedback>
+      
+      {/* UI Overlay */}
+      <View style={styles.uiContainer} pointerEvents="none">
+        {/* Score and Recalibrate */}
+        <View style={styles.scoreContainer}>
+          <Text style={styles.scoreText}>{score}</Text>
+        </View>
+        <View style={styles.recalibrateContainer} pointerEvents="auto">
+          <Text style={styles.recalibrateButton} onPress={recalibrate}>
+            RECALIBRATE
+          </Text>
+        </View>
+        
+        {/* Crosshair — stays centered, target moves behind it */}
+        <View style={[styles.crosshair, { 
+          left: width/2 - 20, 
+          top: height/2 - 20 
+        }]}>
+          <View style={styles.crosshairH} />
+          <View style={styles.crosshairV} />
+        </View>
+        
+        {/* Draw Power Bar */}
+        {gameState === 'drawing' && (
+          <View style={styles.powerContainer}>
+            <Text style={styles.powerLabel}>POWER</Text>
+            <View style={styles.powerBackground}>
+              <Animated.View style={[styles.powerBar, { width: powerWidth }]} />
+            </View>
+          </View>
+        )}
+        
+        {/* Instructions */}
+        <View style={styles.instructions}>
+          <Text style={styles.instructionText}>
+            {gameState === 'aiming' && 'TILT TO AIM • TAP & HOLD TO DRAW'}
+            {gameState === 'drawing' && 'PULL DOWN • RELEASE TO FIRE'}
+            {gameState === 'firing' && '...'}
+          </Text>
+        </View>
+      </View>
+      
+      <StatusBar style="light" hidden />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#87CEEB', // Sky blue
   },
-  gameContainer: {
+  sky: {
     flex: 1,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#87CEEB',
   },
+  ground: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 100,
+    backgroundColor: '#228B22', // Forest green
+  },
+  // Target
+  target: {
+    position: 'absolute',
+    width: 80,
+    height: 80,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  targetRing: {
+    position: 'absolute',
+    backgroundColor: '#fff',
+    borderWidth: 2,
+    borderColor: '#333',
+  },
+  // Bow (first person view)
+  bowTouchArea: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: height * 0.5,
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    paddingBottom: 50,
+  },
+  bowWrapper: {
+    width: 100,
+    height: 150,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bowContainer: {
+    position: 'absolute',
+    width: 60,
+    height: 120,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bowArc: {
+    position: 'absolute',
+    width: 60,
+    height: 120,
+    borderWidth: 4,
+    borderColor: '#8B4513',
+    borderRadius: 30,
+    borderRightWidth: 0,
+  },
+  bowString: {
+    position: 'absolute',
+    width: 2,
+    height: 110,
+    backgroundColor: '#ddd',
+  },
+  bowHandle: {
+    position: 'absolute',
+    left: -6,
+    width: 12,
+    height: 30,
+    backgroundColor: '#654321',
+    borderRadius: 4,
+  },
+  // Arrow
+  arrow: {
+    position: 'absolute',
+    width: 60,
+    height: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  arrowShaft: {
+    width: 50,
+    height: 2,
+    backgroundColor: '#8B4513',
+  },
+  arrowHead: {
+    width: 0,
+    height: 0,
+    borderTopWidth: 3,
+    borderBottomWidth: 3,
+    borderLeftWidth: 6,
+    borderTopColor: 'transparent',
+    borderBottomColor: 'transparent',
+    borderLeftColor: '#666',
+  },
+  // UI
   uiContainer: {
     ...StyleSheet.absoluteFillObject,
-    padding: 20,
   },
   scoreContainer: {
     position: 'absolute',
-    top: 40,
+    top: 50,
     left: 20,
-    alignItems: 'center',
+  },
+  recalibrateContainer: {
+    position: 'absolute',
+    top: 50,
+    right: 20,
+  },
+  recalibrateButton: {
+    fontSize: 14,
+    color: '#fff',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 4,
+    overflow: 'hidden',
   },
   scoreText: {
     fontSize: 48,
     fontWeight: 'bold',
     color: '#fff',
-  },
-  lastShotText: {
-    fontSize: 24,
-    color: '#4CAF50',
-    fontWeight: 'bold',
-  },
-  windContainer: {
-    position: 'absolute',
-    top: 40,
-    right: 20,
-    alignItems: 'center',
-  },
-  windLabel: {
-    fontSize: 12,
-    color: '#888',
-    marginBottom: 4,
-  },
-  windArrow: {
-    alignItems: 'center',
-  },
-  windDirection: {
-    fontSize: 32,
-    color: '#fff',
-  },
-  windSpeed: {
-    fontSize: 14,
-    color: '#888',
-    marginTop: 4,
-  },
-  staminaContainer: {
-    position: 'absolute',
-    bottom: 100,
-    left: 20,
-    right: 20,
-  },
-  drawContainer: {
-    position: 'absolute',
-    bottom: 160,
-    left: 20,
-    right: 20,
-  },
-  barLabel: {
-    fontSize: 12,
-    color: '#888',
-    marginBottom: 4,
-  },
-  barBackground: {
-    height: 12,
-    backgroundColor: '#333',
-    borderRadius: 6,
-    overflow: 'hidden',
-  },
-  staminaBar: {
-    height: '100%',
-    backgroundColor: '#4CAF50',
-    borderRadius: 6,
-  },
-  staminaLow: {
-    backgroundColor: '#f44336',
-  },
-  drawBar: {
-    height: '100%',
-    backgroundColor: '#2196F3',
-    borderRadius: 6,
-  },
-  stateContainer: {
-    position: 'absolute',
-    bottom: 40,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-  },
-  stateText: {
-    fontSize: 16,
-    color: '#888',
-    letterSpacing: 2,
+    textShadowColor: '#000',
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 2,
   },
   crosshair: {
     position: 'absolute',
-    width: 20,
-    height: 20,
+    width: 40,
+    height: 40,
     justifyContent: 'center',
     alignItems: 'center',
   },
   crosshairH: {
     position: 'absolute',
-    width: 20,
+    width: 40,
     height: 2,
-    backgroundColor: 'rgba(255, 255, 255, 0.8)',
+    backgroundColor: 'rgba(255, 0, 0, 0.8)',
   },
   crosshairV: {
     position: 'absolute',
     width: 2,
+    height: 40,
+    backgroundColor: 'rgba(255, 0, 0, 0.8)',
+  },
+  powerContainer: {
+    position: 'absolute',
+    bottom: 200,
+    left: 50,
+    right: 50,
+    alignItems: 'center',
+  },
+  powerLabel: {
+    fontSize: 14,
+    color: '#fff',
+    marginBottom: 5,
+    textShadowColor: '#000',
+    textShadowOffset: { width: 1, height: 1 },
+  },
+  powerBackground: {
+    width: '100%',
     height: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.8)',
+    backgroundColor: '#333',
+    borderRadius: 10,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: '#fff',
+  },
+  powerBar: {
+    height: '100%',
+    backgroundColor: '#ff4444',
+  },
+  instructions: {
+    position: 'absolute',
+    bottom: 20,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
+  instructionText: {
+    fontSize: 16,
+    color: '#fff',
+    textShadowColor: '#000',
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 2,
   },
 });
